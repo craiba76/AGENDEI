@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BelezaClick – Agendamento simples (Firebase)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-pink-50 to-pink-100">
+  <div class="max-w-6xl mx-auto p-4 md:p-8 space-y-6">
+    <div class="bg-white rounded-2xl shadow p-2 flex gap-2">
+      <button id="tabSiteBtn" class="flex-1 px-4 py-3 rounded-xl bg-pink-600 text-white font-semibold hover:scale-105 transition">Site de Agendamento</button>
+      <button id="tabAdminBtn" class="flex-1 px-4 py-3 rounded-xl bg-gray-100 font-semibold hover:scale-105 transition">Painel Admin</button>
+    </div>
+    <div id="toastContainer" class="fixed top-4 right-4 space-y-2 z-50"></div>
+    <div id="app" class="space-y-6"></div>
+    <footer class="text-center text-sm text-gray-500">
+      BelezaClick — agendamentos em tempo real (Firebase)
+    </footer>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import {
+      getFirestore, collection, doc, getDocs, setDoc, query, where, orderBy,
+      updateDoc, deleteDoc, runTransaction
+    } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
+    import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut, updatePassword } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
+    import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-storage.js";
+
+    const firebaseConfig = {
+      apiKey: "SUA_API_KEY",
+      authDomain: "SEU_PROJETO.firebaseapp.com",
+      projectId: "SEU_PROJETO",
+      storageBucket: "SEU_PROJETO.appspot.com",
+      messagingSenderId: "SENDER_ID",
+      appId: "APP_ID",
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const auth = getAuth(app);
+    const storage = getStorage(app);
+
+    // ===== Toast helper =====
+    function showToast(msg, type="success"){
+      const id = "t"+Date.now();
+      const div = document.createElement("div");
+      div.id=id;
+      div.className=`px-4 py-2 rounded-xl shadow text-white ${type==='error'?'bg-rose-600':'bg-emerald-600'}`;
+      div.textContent=msg;
+      document.getElementById("toastContainer").appendChild(div);
+      setTimeout(()=>div.remove(),3000);
+    }
+
+    const SLOTS = ["09:00", "11:30", "14:00", "16:30"];
+    function toISODate(d){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;}
+    function isMonToSat(d){return d.getDay()>=1 && d.getDay()<=6;}
+    function nextWorkdays(count=14){const out=[];const d=new Date();for(let i=0;out.length<count;i++){const x=new Date(d);x.setDate(d.getDate()+i);if(isMonToSat(x)) out.push(toISODate(x));}return out;}
+
+    let currentTab='site';
+    const $app=document.getElementById('app');
+    document.getElementById('tabSiteBtn').addEventListener('click',()=>{currentTab='site';paint();});
+    document.getElementById('tabAdminBtn').addEventListener('click',()=>{currentTab='admin';paint();});
+    onAuthStateChanged(auth,()=>{if(currentTab==='admin')paint();});
+
+    // ===== Seed inicial =====
+    async function seedInitialData(){
+      try{await createUserWithEmailAndPassword(auth,"nathali@teste.com","12345");}catch(e){}
+      const snap=await getDocs(collection(db,'servicos'));
+      if(snap.empty){
+        const defaults=[
+          {nome:"Volume 5D Brasileiro", preco:150, imagem:"URL_DA_IMAGEM_BRASILEIRO", ativo:true},
+          {nome:"Volume 5D Marrom", preco:160, imagem:"URL_DA_IMAGEM_MARROM", ativo:true},
+          {nome:"Volume 5D Preto", preco:170, imagem:"URL_DA_IMAGEM_PRETO", ativo:true},
+          {nome:"Volume Brasileiro", preco:180, imagem:"URL_DA_IMAGEM_VOLUME_BR", ativo:true}
+        ];
+        for(const s of defaults){
+          const ref=doc(collection(db,'servicos'));
+          await setDoc(ref,{...s, criadoEm:new Date().toISOString()});
+        }
+      }
+    }
+    seedInitialData();
+
+    async function paint(){ if(currentTab==='site') return renderSite(); return renderAdmin(); }
+
+    // ===== Site Cliente ===== (igual antes)
+    // ... (mantém igual, sem alteração)
+
+    // ===== Painel Admin =====
+    function adminLoginView(){
+      $app.innerHTML=`<div class="max-w-sm mx-auto bg-white p-6 rounded-2xl shadow"><h2 class="text-xl mb-4">Entrar</h2><form id="loginForm" class="space-y-3"><input id="email" class="border p-3 w-full rounded-xl" placeholder="E-mail"/><input id="senha" type="password" class="border p-3 w-full rounded-xl" placeholder="Senha"/><p id="erro" class="text-red-600"></p><button class="bg-emerald-600 text-white px-4 py-2 w-full rounded-2xl hover:scale-105 transition">Entrar</button></form></div>`;
+      document.getElementById('loginForm').addEventListener('submit',async e=>{
+        e.preventDefault();
+        try{
+          await signInWithEmailAndPassword(auth,document.getElementById('email').value.trim(),document.getElementById('senha').value.trim());
+        }catch(err){
+          document.getElementById('erro').textContent='Falha no login';
+        }
+      });
+    }
+
+    async function renderAdmin(){
+      if(!auth.currentUser){adminLoginView();return;}
+
+      // Checar se senha ainda é padrão
+      if(auth.currentUser.email === "nathali@teste.com" && auth.currentUser.metadata.creationTime === auth.currentUser.metadata.lastSignInTime){
+        $app.innerHTML=`<div class="max-w-sm mx-auto bg-white p-6 rounded-2xl shadow space-y-3"><h2 class="text-xl mb-4">Troque sua senha</h2><input id="newPass" type="password" class="border p-3 w-full rounded-xl" placeholder="Nova senha"/><button id="chgPassBtn" class="bg-emerald-600 text-white px-4 py-2 w-full rounded-2xl">Salvar</button></div>`;
+        document.getElementById('chgPassBtn').addEventListener('click',async()=>{
+          const newPass=document.getElementById('newPass').value.trim();
+          if(newPass.length<5){showToast("Senha muito curta","error");return;}
+          try{await updatePassword(auth.currentUser,newPass);showToast("Senha alterada");paint();}catch(e){showToast("Erro ao trocar senha","error");}
+        });
+        return;
+      }
+
+      $app.innerHTML=`<div class="flex justify-between items-center"><h2 class="text-2xl font-bold text-pink-700">Painel Admin</h2><button id="logoutBtn" class="px-4 py-2 bg-gray-800 text-white rounded-xl hover:scale-105 transition">Sair</button></div><div class="bg-white p-2 rounded-2xl shadow flex gap-2"><button id="tabAgBtn" class="flex-1 bg-pink-600 text-white px-4 py-2 rounded-xl">Agendamentos</button><button id="tabSrvBtn" class="flex-1 bg-gray-100 px-4 py-2 rounded-xl">Serviços</button></div><div id="adminContent"></div>`;
+
+      document.getElementById('logoutBtn').addEventListener('click',()=>signOut(auth));
+
+      let tab='ag';
+      async function paintAdmin(){
+        if(tab==='ag'){
+          const snap=await getDocs(query(collection(db,'agendamentos'),orderBy('dia'),orderBy('hora')));
+          const items=snap.docs.map(d=>({id:d.id,...d.data()}));
+          document.getElementById('adminContent').innerHTML=`<table class="min-w-full text-sm"><thead><tr class="bg-pink-600 text-white"><th class="p-2">Serviço</th><th class="p-2">Data</th><th class="p-2">Hora</th><th class="p-2">Cliente</th><th class="p-2">Status</th><th class="p-2">Ações</th></tr></thead><tbody>${items.map(a=>`<tr><td class="p-2">${a.servicoNome}</td><td>${a.dia}</td><td>${a.hora}</td><td>${a.nome}</td><td>${a.status}</td><td>${a.status!=='confirmado'?`<button data-id='${a.id}' class='conf px-2 bg-emerald-600 text-white rounded'>Conf</button>`:''}<button data-id='${a.id}' class='del px-2 bg-rose-600 text-white rounded ml-1'>Del</button></td></tr>`).join('')}</tbody></table>`;
+          document.querySelectorAll('.conf').forEach(b=>b.addEventListener('click',async()=>{await updateDoc(doc(db,'agendamentos',b.dataset.id),{status:'confirmado'});showToast("Agendamento confirmado");paintAdmin();}));
+          document.querySelectorAll('.del').forEach(b=>b.addEventListener('click',async()=>{await deleteDoc(doc(db,'agendamentos',b.dataset.id));showToast("Agendamento excluído","error");paintAdmin();}));
+        }else{
+          const snap=await getDocs(query(collection(db,'servicos'),orderBy('nome')));
+          const items=snap.docs.map(d=>({id:d.id,...d.data()}));
+          document.getElementById('adminContent').innerHTML=`<div class="mb-4 bg-white p-4 rounded-2xl shadow"><h3 class="font-bold mb-2">➕ Novo Serviço</h3><input id="newName" class="border p-2 rounded w-full mb-2" placeholder="Nome do serviço"/><input id="newPrice" type="number" class="border p-2 rounded w-full mb-2" placeholder="Preço"/><input id="newImage" type="file" accept="image/*" class="mb-2"/><button id="addSrvBtn" class="bg-emerald-600 text-white px-4 py-2 rounded-xl hover:scale-105 transition">Salvar</button></div><div>${items.map(s=>`<div class='bg-white shadow p-3 rounded-2xl mb-2'><img src='${s.imagem}' class='w-full h-32 object-cover rounded mb-2'/><input class='nameEdit border p-1 w-full my-1' data-id='${s.id}' value='${s.nome}'/><input class='priceEdit border p-1 w-full my-1' data-id='${s.id}' value='${s.preco??''}' placeholder='Preço'/><label class='block my-1'><input type='checkbox' class='activeToggle' data-id='${s.id}' ${s.ativo?'checked':''}/> Ativo</label><input type='file' class='imgEdit my-1' data-id='${s.id}' accept='image/*'/><button class='delSrv bg-rose-600 text-white px-2 rounded mt-2' data-id='${s.id}'>Excluir</button></div>`).join('')}</div>`;
+
+          document.getElementById('addSrvBtn').addEventListener('click', async ()=>{
+            const nome=document.getElementById('newName').value.trim();
+            const preco=Number(document.getElementById('newPrice').value);
+            const file=document.getElementById('newImage').files[0];
+            if(!nome||!file){showToast("Nome e imagem obrigatórios","error");return;}
+            const imgRef=storageRef(storage,'servicos/'+Date.now()+'_'+file.name);
+            await uploadBytes(imgRef,file);
+            const url=await getDownloadURL(imgRef);
+            const ref=doc(collection(db,'servicos'));
+            await setDoc(ref,{nome,preco,imagem:url,ativo:true,criadoEm:new Date().toISOString()});
+            showToast("Serviço adicionado");
+            paintAdmin();
+          });
+
+          document.querySelectorAll('.nameEdit').forEach(inp=>inp.addEventListener('change',async()=>{await updateDoc(doc(db,'servicos',inp.dataset.id),{nome:inp.value});showToast("Nome atualizado");}));
+          document.querySelectorAll('.priceEdit').forEach(inp=>inp.addEventListener('change',async()=>{await updateDoc(doc(db,'servicos',inp.dataset.id),{preco:inp.value===''?null:Number(inp.value)});showToast("Preço atualizado");}));
+          document.querySelectorAll('.activeToggle').forEach(chk=>chk.addEventListener('change',async()=>{await updateDoc(doc(db,'servicos',chk.dataset.id),{ativo:chk.checked});showToast("Status alterado");}));
+          document.querySelectorAll('.imgEdit').forEach(inp=>inp.addEventListener('change',async()=>{
+            const file=inp.files[0];
+            if(!file) return;
+            const imgRef=storageRef(storage,'servicos/'+Date.now()+'_'+file.name);
+            await uploadBytes(imgRef,file);
+            const url=await getDownloadURL(imgRef);
+            await updateDoc(doc(db,'servicos',inp.dataset.id),{imagem:url});
+            showToast("Imagem atualizada");
+            paintAdmin();
+          }));
+          document.querySelectorAll('.delSrv').forEach(btn=>btn.addEventListener('click',async()=>{await deleteDoc(doc(db,'servicos',btn.dataset.id));showToast("Serviço excluído","error");paintAdmin();}));
+        }
+      }
+
+      paintAdmin();
+      document.getElementById('tabAgBtn').addEventListener('click',()=>{tab='ag';paintAdmin();});
+      document.getElementById('tabSrvBtn').addEventListener('click',()=>{tab='srv';paintAdmin();});
+    }
+
+    paint();
+  </script>
+</body>
+</html>
